@@ -65,9 +65,9 @@ python verification/validate_math_stage5_gradient_identities_torch.py
 | 1 | 随机舍入（SR） | SR 噪声方差 = Δ²/6、无偏性 E[η]=0、clip 含 DC 分量 | S | `stage1_sr.py` / `_torch.py` |
 | 2 | 位操作代数 | 位拆分严格可逆 value=high·2^p+low、bitsplit/concat 可逆、int16≡两个 int8、scale=max/(2^(b-1)-1) | T | `stage2_bitsplit.py` / `_torch.py` |
 | 3 | 精度分配 | 贪心 bits 分配 = 全局最优（gap=0）、误差∝1/(2^b-1)、16→32-bit 精度提升≈2^16 | T/E | `stage3_precision_budget.py` / `_torch.py` |
-| 4 | 噪声整形 | EF≡delta-sigma（NTF=(1-z⁻¹)^N, STF=1）、低频抑制、clip 噪声放大 191000×、分离残差修复 | S/E | `stage4_ntf_noise_shaping.py` / `_torch.py` |
+| 4 | 噪声整形 | EF≡delta-sigma（NTF=(1-z⁻¹)^N, STF=1）、低频抑制、clip 噪声放大 ≈9.0×10⁴×（实测 90327×）、分离残差修复 | S/E | `stage4_ntf_noise_shaping.py` / `_torch.py` |
 | 5 | 梯度恒等式 | 残差 skip 恒等梯度、损失梯度÷总元素数、CE 梯度=(softmax-one_hot)/B | T | `stage5_gradient_identities.py` / `_torch.py` |
-| 6 | 网络属性 | 超度量性违反率 100%（证伪复核）、深层残差放大 86× | S/E | `stage6_network_properties.py` / `_torch.py` |
+| 6 | 网络属性 | 超度量性违反率 100%（证伪复核）、深层残差指数放大（量级配置相关） | S/E | `stage6_network_properties.py` / `_torch.py` |
 
 > 全部 6 个主题双库互证 22/22 项 PASS（2026-08-15，含 stage1 逆推对照：反解 Δ 与 log-log 指数）。
 

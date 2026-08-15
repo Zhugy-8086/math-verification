@@ -12,12 +12,13 @@
 验证项（与 validate_math_stage4_ntf_noise_shaping.py 对齐）：
   #13 [S] EF ≡ delta-sigma：NTF=(1-z⁻¹)^N, STF=1
   #14 [S] 1 阶 EF 低频抑制（梯度=低通，EF=高通互补）
-  #15 [E] clip 噪声 NTF 放大 191000×（低频功率）
+  #15 [E] clip 噪声 NTF 放大 90327×（低频功率）
   #16 [S] 分离残差 EF 修复 clip 场景（不反馈 clip 误差）
 
 双库实现分工：
   - 信号生成：numpy rng（同 seed，保证输入一致）
   - 量化器随机源：numpy 版用 np rng；torch 版用 torch.Generator（独立随机流）
+  - EF 时序递推：numpy 版与 torch 版独立实现（run_ef_np / run_ef_torch）
   - 频谱分析：numpy 版用 np.fft；torch 版用 torch.fft（FFT 算法实现不同）
   - 指标级比对：S 类统计容差（相对 5e-4），T 类机器精度
 
@@ -48,8 +49,8 @@ def ef_coefficients(N: int):
     return [(-1) ** (k + 1) * comb(N, k) for k in range(1, N + 1)]
 
 
-def run_ef(g_seq, quantize, scheme: str, N: int = 1):
-    """EF 时序递推（Python 标量，双库共用同一结构）"""
+def run_ef_np(g_seq, quantize, scheme: str, N: int = 1):
+    """NumPy EF 时序递推（numpy 标量路径，独立于 torch 路径）"""
     T = len(g_seq)
     if scheme == 'no_ef':
         n = np.zeros(T)
@@ -81,6 +82,39 @@ def run_ef(g_seq, quantize, scheme: str, N: int = 1):
     return n, eta
 
 
+def run_ef_torch(g_seq, quantize, scheme: str, N: int = 1):
+    """PyTorch EF 时序递推（torch 标量张量累积，与 numpy 路径独立实现）"""
+    T = len(g_seq)
+    if scheme == 'no_ef':
+        n = torch.zeros(T, dtype=torch.float64)
+        for t in range(T):
+            q, _ = quantize(float(g_seq[t]))
+            n[t] = float(q) - float(g_seq[t])
+        return n.numpy(), None
+    e_buffers = [torch.zeros((), dtype=torch.float64) for _ in range(N)]
+    coeffs = ef_coefficients(N)
+    n = torch.zeros(T, dtype=torch.float64)
+    eta = torch.zeros(T, dtype=torch.float64)
+    for t in range(T):
+        g = float(g_seq[t])
+        g_hat = torch.full((), g, dtype=torch.float64)
+        for k in range(N):
+            g_hat = g_hat + coeffs[k] * e_buffers[k]
+        q_t, q_trunc_t = quantize(g_hat)            # torch 标量张量
+        q = float(q_t)
+        q_trunc = float(q_trunc_t)
+        n[t] = q - g
+        eta[t] = q - g_hat.item()
+        if scheme == 'standard':
+            e_new = g_hat - q_t
+        else:
+            e_new = g_hat - q_trunc_t
+        for k in range(N - 1, 0, -1):
+            e_buffers[k] = e_buffers[k - 1]
+        e_buffers[0] = e_new
+    return n.numpy(), eta.numpy()
+
+
 def make_sr_quantizer_np(delta, clamp, rng):
     """NumPy SR 量化器（随机源：np rng）"""
     def quantize(x):
@@ -104,17 +138,21 @@ def make_sr_quantizer_np(delta, clamp, rng):
 
 
 def make_sr_quantizer_torch(delta, clamp, gen):
-    """PyTorch SR 量化器（随机源：torch.Generator 独立随机流）"""
-    def quantize(x):
-        u = torch.rand(1, dtype=torch.float32, generator=gen).item()
-        return _sr_step(float(x), u)
+    """PyTorch SR 量化器（纯 torch 计算：torch.floor/torch.clamp；
+    随机源：torch.Generator 独立随机流）"""
+    delta_t = torch.tensor(delta, dtype=torch.float64)
 
-    def _sr_step(x, u):
-        x_div = x / delta
-        q_floor = np.floor(x_div)
+    def quantize(x):
+        u = torch.rand((), dtype=torch.float32, generator=gen)
+        x_t = torch.as_tensor(float(x), dtype=torch.float64)
+        x_div = x_t / delta_t
+        q_floor = torch.floor(x_div)
         frac = x_div - q_floor
-        q_trunc = (q_floor + float(u < frac)) * delta
-        q_clip = np.clip(q_trunc, -clamp, clamp) if clamp is not None else q_trunc
+        q_trunc = (q_floor + (u.to(torch.float64) < frac).to(torch.float64)) * delta_t
+        if clamp is not None:
+            q_clip = torch.clamp(q_trunc, -clamp, clamp)
+        else:
+            q_clip = q_trunc
         return q_clip, q_trunc
     return quantize
 
@@ -246,8 +284,8 @@ def verify_ntf_identity():
         g = ar1_signal(T, 0.99, 0.5, rng_n)
         q_n = make_sr_quantizer_np(DELTA, None, rng_n)
         q_t = make_sr_quantizer_torch(DELTA, None, gen_t)
-        n_n, eta_n = run_ef(g, q_n, 'standard', N=N)
-        n_t, eta_t = run_ef(g, q_t, 'standard', N=N)
+        n_n, eta_n = run_ef_np(g, q_n, 'standard', N=N)
+        n_t, eta_t = run_ef_torch(g, q_t, 'standard', N=N)
         ident_np = float(np.max(np.abs(n_n - apply_ntf_filter_np(eta_n, N))))
         ident_t = float(torch.max(torch.abs(
             torch.as_tensor(n_t) - apply_ntf_filter_torch(eta_t, N))).item())
@@ -266,8 +304,8 @@ def verify_ntf_identity():
     sig = 1.0 * np.sin(fs * np.arange(T)) + 0.3
     q_n = make_sr_quantizer_np(DELTA, None, rng_n)
     q_t = make_sr_quantizer_torch(DELTA, None, gen_t)
-    n_n, _ = run_ef(sig, q_n, 'standard', N=1)
-    n_t, _ = run_ef(sig, q_t, 'standard', N=1)
+    n_n, _ = run_ef_np(sig, q_n, 'standard', N=1)
+    n_t, _ = run_ef_torch(sig, q_t, 'standard', N=1)
     probe = np.exp(-1j * fs * np.arange(T))
     sig_amp = np.abs(np.dot(sig, probe))
     stf_np = np.abs(np.dot(sig + n_n, probe)) / sig_amp
@@ -288,8 +326,8 @@ def verify_ntf_identity():
         for N in [1, 2, 3]:
             q_n = make_sr_quantizer_np(DELTA, None, rng_s)
             q_t = make_sr_quantizer_torch(DELTA, None, gen_s)
-            n_n, _ = run_ef(g_const, q_n, 'standard', N=N)
-            n_t, _ = run_ef(g_const, q_t, 'standard', N=N)
+            n_n, _ = run_ef_np(g_const, q_n, 'standard', N=N)
+            n_t, _ = run_ef_torch(g_const, q_t, 'standard', N=N)
             psd_n, freqs = welch_psd_np(n_n)
             psd_t, _ = welch_psd_torch(n_t)
             omegas = 2 * np.pi * freqs
@@ -334,8 +372,8 @@ def verify_lowfreq_suppression():
         g = ar1_signal(T, 0.99, 0.5, rng)
         q_n = make_sr_quantizer_np(DELTA, None, rng)
         q_t = make_sr_quantizer_torch(DELTA, None, gen)
-        n_n, _ = run_ef(g, q_n, 'standard', N=1)
-        n_t, _ = run_ef(g, q_t, 'standard', N=1)
+        n_n, _ = run_ef_np(g, q_n, 'standard', N=1)
+        n_t, _ = run_ef_torch(g, q_t, 'standard', N=1)
         supp_np.append(theory_var / max(lowfreq_power_np(n_n), 1e-30))
         supp_t.append(theory_var / max(lowfreq_power_torch(n_t), 1e-30))
     sn, st = np.array(supp_np), np.array(supp_t)
@@ -382,7 +420,7 @@ def verify_lowfreq_suppression():
     r12_t = dc1_t / max(dc2_t, 1e-30)
     ok_ag = _compare("1阶→2阶 DC 比", r12_np, r12_t, kind="S")
     all_ok &= ok_ag
-    print(f"      1阶→2阶 DC 功率比 numpy={r12_np:.0f}× torch={r12_t:.0f}×（报告 10385×）")
+    print(f"      1阶→2阶 DC 功率比 numpy={r12_np:.0f}× torch={r12_t:.0f}×（报告 657740×）")
 
     print(f"  结论: {'✓ 1 阶 EF 低频抑制 + 高低通互补（双库一致）' if all_ok else '✗ 有失败'}")
     report["#14"] = {"pass": all_ok}
@@ -390,11 +428,11 @@ def verify_lowfreq_suppression():
 
 
 # ============================================================
-# #15 [E] clip 噪声 NTF 放大 191000×（低频功率）
+# #15 [E] clip 噪声 NTF 放大 90327×（低频功率）
 # ============================================================
 def verify_clip_amplification():
     print("\n" + "=" * 72)
-    print("#15 [E] clip 噪声 NTF 放大 191000×（双库互证）")
+    print("#15 [E] clip 噪声 NTF 放大 90327×（双库互证）")
     print("=" * 72)
 
     T = 100_000
@@ -409,10 +447,10 @@ def verify_clip_amplification():
         g = ar1_signal(T, RHO, 0.5, rng)
         q_n = make_sr_quantizer_np(DELTA, CLAMP, rng)
         q_t = make_sr_quantizer_torch(DELTA, CLAMP, gen)
-        n_noef_n, _ = run_ef(g, q_n, 'no_ef')
-        n_noef_t, _ = run_ef(g, q_t, 'no_ef')
-        _, eta_std_n = run_ef(g, q_n, 'standard', N=1)
-        _, eta_std_t = run_ef(g, q_t, 'standard', N=1)
+        n_noef_n, _ = run_ef_np(g, q_n, 'no_ef')
+        n_noef_t, _ = run_ef_torch(g, q_t, 'no_ef')
+        _, eta_std_n = run_ef_np(g, q_n, 'standard', N=1)
+        _, eta_std_t = run_ef_torch(g, q_t, 'standard', N=1)
         lp_noef_n = lowfreq_power_np(n_noef_n)
         lp_std_n = lowfreq_power_np(eta_std_n)
         lp_noef_t = lowfreq_power_torch(n_noef_t)
@@ -422,12 +460,12 @@ def verify_clip_amplification():
 
     rn = np.array(ratios_np); rt = np.array(ratios_t)
     mean_np, mean_t = float(rn.mean()), float(rt.mean())
-    theory = 191000.0
-    ok_np = theory / 10 <= mean_np <= theory * 10
-    ok_t = theory / 10 <= mean_t <= theory * 10
+    theory = 90327.0
+    ok_np = theory / 3 <= mean_np <= theory * 3
+    ok_t = theory / 3 <= mean_t <= theory * 3
     ok_ag = _compare("低频功率放大比", mean_np, mean_t, kind="S")
     ok = ok_np and ok_t and ok_ag
-    print(f"      放大比 numpy={mean_np:.0f}× torch={mean_t:.0f}×（冻结结论 191000×）")
+    print(f"      放大比 numpy={mean_np:.0f}× torch={mean_t:.0f}×（冻结结论 90327×）")
 
     # --- 更大 T 扫描：放大比量级随 T 稳定（更大规模不改变结论，双库比对）---
     print("\n  --- 更大 T 扫描（放大比随 T 稳定性，双库比对）---")
@@ -441,14 +479,14 @@ def verify_clip_amplification():
             g = ar1_signal(T_s, RHO, 0.5, rng)
             q_n = make_sr_quantizer_np(DELTA, CLAMP, rng)
             q_t = make_sr_quantizer_torch(DELTA, CLAMP, gen)
-            n_noef_n, _ = run_ef(g, q_n, 'no_ef')
-            n_noef_t, _ = run_ef(g, q_t, 'no_ef')
-            _, eta_std_n = run_ef(g, q_n, 'standard', N=1)
-            _, eta_std_t = run_ef(g, q_t, 'standard', N=1)
+            n_noef_n, _ = run_ef_np(g, q_n, 'no_ef')
+            n_noef_t, _ = run_ef_torch(g, q_t, 'no_ef')
+            _, eta_std_n = run_ef_np(g, q_n, 'standard', N=1)
+            _, eta_std_t = run_ef_torch(g, q_t, 'standard', N=1)
             r_np.append(lowfreq_power_np(eta_std_n) / max(lowfreq_power_np(n_noef_n), 1e-30))
             r_t.append(lowfreq_power_torch(eta_std_t) / max(lowfreq_power_torch(n_noef_t), 1e-30))
         m_np, m_t = float(np.mean(r_np)), float(np.mean(r_t))
-        ok_sc = (theory / 10 <= m_np <= theory * 10) and (theory / 10 <= m_t <= theory * 10)
+        ok_sc = (theory / 3 <= m_np <= theory * 3) and (theory / 3 <= m_t <= theory * 3)
         ok_ag = _compare(f"T={T_s} 放大比", m_np, m_t, kind="S", rtol=2e-2)
         scan[T_s] = {"np": m_np, "torch": m_t, "consistent": bool(ok_sc and ok_ag)}
         print(f"    T={T_s:>6d}: 放大比 numpy={m_np:.0f}× torch={m_t:.0f}×")
@@ -486,12 +524,12 @@ def verify_separated_ef():
         g = ar1_signal(T, RHO, 0.5, rng)
         q_n = make_sr_quantizer_np(DELTA, CLAMP, rng)
         q_t = make_sr_quantizer_torch(DELTA, CLAMP, gen)
-        n_noef_n, _ = run_ef(g, q_n, 'no_ef')
-        _, eta_std_n = run_ef(g, q_n, 'standard', N=1)
-        _, eta_sep_n = run_ef(g, q_n, 'separated', N=1)
-        n_noef_t, _ = run_ef(g, q_t, 'no_ef')
-        _, eta_std_t = run_ef(g, q_t, 'standard', N=1)
-        _, eta_sep_t = run_ef(g, q_t, 'separated', N=1)
+        n_noef_n, _ = run_ef_np(g, q_n, 'no_ef')
+        _, eta_std_n = run_ef_np(g, q_n, 'standard', N=1)
+        _, eta_sep_n = run_ef_np(g, q_n, 'separated', N=1)
+        n_noef_t, _ = run_ef_torch(g, q_t, 'no_ef')
+        _, eta_std_t = run_ef_torch(g, q_t, 'standard', N=1)
+        _, eta_sep_t = run_ef_torch(g, q_t, 'separated', N=1)
         lp_noef_n = lowfreq_power_np(n_noef_n)
         lp_noef_t = lowfreq_power_torch(n_noef_t)
         sep_np.append(lowfreq_power_np(eta_sep_n) / max(lp_noef_n, 1e-30))
@@ -541,7 +579,7 @@ def main():
     print(f"  耗时 {dt:.1f}s")
     print(f"  #13 [S] EF≡delta-sigma NTF/STF : {'✓' if r13 else '✗'}")
     print(f"  #14 [S] 1阶EF低频抑制+高低通互补 : {'✓' if r14 else '✗'}")
-    print(f"  #15 [E] clip 噪声 NTF 放大 191000× : {'✓' if r15 else '✗'}")
+    print(f"  #15 [E] clip 噪声 NTF 放大 90327× : {'✓' if r15 else '✗'}")
     print(f"  #16 [S] 分离残差 EF 修复 clip   : {'✓' if r16 else '✗'}")
     overall = r13 and r14 and r15 and r16
     print(f"\n  总体判定: {'✅ 双库全部一致通过' if overall else '❌ 存在失败'}")

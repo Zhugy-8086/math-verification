@@ -2,7 +2,7 @@
   "stage": 3,
   "backend": "numpy+torch",
   "kind": "T/E",
-  "elapsed_s": 2.22,
+  "elapsed_s": 2.17,
   "report": {
     "#9": {
       "scenarios": 300,

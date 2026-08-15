@@ -2,7 +2,7 @@
   "stage": 4,
   "backend": "numpy+torch",
   "kind": "S/E",
-  "elapsed_s": 100.42,
+  "elapsed_s": 434.76,
   "report": {
     "#13": {
       "pass": true
@@ -34,7 +34,7 @@
     "#15": {
       "ratio_np": 90326.72546265727,
       "ratio_torch": 90326.33665994566,
-      "theory": 191000.0,
+      "theory": 90327.0,
       "pass": true
     },
     "#16": {

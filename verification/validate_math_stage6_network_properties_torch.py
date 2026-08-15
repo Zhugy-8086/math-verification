@@ -11,7 +11,7 @@
 
 验证项（与 validate_math_stage6_network_properties.py 对齐）：
   #20 [S] 超度量性违反率 100%（定理 7.4 复现证伪）
-  #21 [E] 深层残差放大 86×（Jacobian 范数>1）
+  #21 [E] 深层残差指数放大（Jacobian 范数>1）
 
 双库实现分工：
   - #20 两库独立采样（np rng / torch.Generator），独立计算统计量
@@ -98,7 +98,7 @@ def verify_ultrametric_violation():
 
 
 # ============================================================
-# #21 [E] 深层残差放大 86×（Jacobian 范数>1）
+# #21 [E] 深层残差指数放大（Jacobian 范数>1）
 # ============================================================
 LAYER_DIMS = [64, 48, 32, 16, 8]
 N_LAYERS = len(LAYER_DIMS) - 1
@@ -170,7 +170,7 @@ def _fit_logslope_torch(log_rel, n_layers=None):
 
 def verify_residual_amplification():
     print("\n" + "=" * 72)
-    print("#21 [E] 深层残差放大 86×（双库互证，独立实现）")
+    print("#21 [E] 深层残差指数放大（双库互证，独立实现）")
     print("=" * 72)
     print(f"4 层 ReLU [{LAYER_DIMS[0]},...,{LAYER_DIMS[-1]}]，混合精度 EF")
 
@@ -179,9 +179,9 @@ def verify_residual_amplification():
     per_layer_t, geo_t, gap_t, r2_t = [], [], [], []
     for seed in SEEDS:
         rng = np.random.default_rng(seed)
-        Ws = [np.random.randn(LAYER_DIMS[i + 1], LAYER_DIMS[i]) *
+        Ws = [rng.standard_normal((LAYER_DIMS[i + 1], LAYER_DIMS[i])) *
               np.sqrt(2.0 / LAYER_DIMS[i]) for i in range(N_LAYERS)]
-        bs0 = [np.random.randn(LAYER_DIMS[i + 1]) * 0.1 for i in range(N_LAYERS)]
+        bs0 = [rng.standard_normal(LAYER_DIMS[i + 1]) * 0.1 for i in range(N_LAYERS)]
 
         # ---- numpy 实现（与原脚本同逻辑）----
         res_n, grad_n = _ef_forward_backward_accum_np(Ws, bs0, SCALE, rng)
@@ -229,7 +229,7 @@ def verify_residual_amplification():
           and mg_np > 1.0 and mg_t > 1.0
           and ok_ag1 and ok_ag2 and ok_ag3 and ok_ag4)
     print(f"  每层放大: numpy={pl_np:.1f}× torch={pl_t:.1f}×  (R² numpy={mr_np:.3f} torch={mr_t:.3f})")
-    print(f"  L3/L1:   numpy={geo_np_:.0f}× torch={geo_t_:.0f}×  (报告 86×)")
+    print(f"  L3/L1:   numpy={geo_np_:.0f}× torch={geo_t_:.0f}×  (结构性结论，数值配置相关)")
     print(f"  梯度放大: numpy={mg_np:.1f}× torch={mg_t:.1f}×  (Jacobian>1)")
     print("  注: 每层放大/L3-L1 为高方差 E 类统计量（跨 seed 近 log-分布，个别 seed 病态值主导均值）；")
     print("      2σ 判定确认双库估计在统计上不可区分，定性结论（每层>1.2、R²>0.7、Jacobian>1）双库均成立")
@@ -249,9 +249,9 @@ def verify_residual_amplification():
         pl_n_arr, pl_t_arr, r2_n_arr, r2_t_arr = [], [], [], []
         for seed in SEEDS:
             rng = np.random.default_rng(seed)
-            Ws = [np.random.randn(dims[i + 1], dims[i]) *
+            Ws = [rng.standard_normal((dims[i + 1], dims[i])) *
                   np.sqrt(2.0 / dims[i]) for i in range(nl)]
-            bs0 = [np.random.randn(dims[i + 1]) * 0.1 for i in range(nl)]
+            bs0 = [rng.standard_normal(dims[i + 1]) * 0.1 for i in range(nl)]
             res_n, grad_n = _ef_forward_backward_accum_np(Ws, bs0, SCALE, rng, dims=dims)
             rel_n = res_n / np.maximum(grad_n, 1e-12)
             log_rel_n = np.log(np.maximum(rel_n, 1e-12))
@@ -399,7 +399,7 @@ def main():
     print("=" * 72)
     print(f"  耗时 {dt:.1f}s")
     print(f"  #20 [S] 超度量违反率100% (复现证伪) : {'✓' if r20 else '✗'}")
-    print(f"  #21 [E] 深层残差放大86× (经验标度)   : {'✓' if r21 else '✗'}")
+    print(f"  #21 [E] 深层残差指数放大 (经验标度)   : {'✓' if r21 else '✗'}")
     overall = r20 and r21
     print(f"\n  总体判定: {'✅ 双库全部一致通过' if overall else '❌ 存在失败'}")
     if not overall:

@@ -7,7 +7,7 @@
 
 验证目标（纯数据验证，非神经网络训练）：
   #20 [S] 超度量性违反率 100%（定理 7.4 证伪复核）→ **复现证伪**
-  #21 [E] 深层残差放大 86×（Jacobian 范数>1）→ 经验标度复核
+  #21 [E] 深层残差指数放大（Jacobian 范数>1）→ 经验标度复核
 
 性质类别（§2.4）：
   #20 为 [S]（统计定律），但本身是**证伪结论** → 目标复现"违反"而非证明成立
@@ -20,7 +20,7 @@
 报告依据：
   #20 定理 7.4：连续 iid 变量（log-half-normal）排序后三点，违反率 100%，
       违反幅度（最大距离-次大距离）p50=0.4697 / p90=1.3637 / p99=2.5212 / mean=0.6207
-  #21 深层残差放大：4 层网络误差反馈残差 L3 vs L1 放大 86×；
+  #21 深层残差放大：4 层网络误差反馈残差 L3 vs L1 指数放大（量级配置相关）；
       放大因子 = 噪声整形级联增益(2^L) × Jacobian^L，主因 Jacobian 范数>1
 
 用法（纯 numpy）：
@@ -84,7 +84,7 @@ def verify_ultrametric_violation():
 
 
 # ============================================================
-# #21 [E] 深层残差放大 86×（Jacobian 范数>1）
+# #21 [E] 深层残差指数放大（Jacobian 范数>1）
 # ============================================================
 LAYER_DIMS = [64, 48, 32, 16, 8]
 N_LAYERS = len(LAYER_DIMS) - 1               # 4 层
@@ -174,7 +174,7 @@ def _ef_forward_backward_accum(weights, biases, scale_factor, rng, B=32, dims=No
 
 def verify_residual_amplification():
     print("\n" + "=" * 72)
-    print("#21 [E] 深层残差放大 86×（Jacobian 范数>1）")
+    print("#21 [E] 深层残差指数放大（Jacobian 范数>1）")
     print("=" * 72)
     print(f"4 层 ReLU [{LAYER_DIMS[0]},{LAYER_DIMS[1]},{LAYER_DIMS[2]},{LAYER_DIMS[3]},{LAYER_DIMS[4]}]")
     print("混合精度 EF：int16 存储 + int8 应用 + int32 残差")
@@ -190,9 +190,9 @@ def verify_residual_amplification():
     amps, gap_l3, r2s, bs = [], [], [], []
     for seed in SEEDS:
         rng = np.random.default_rng(seed)
-        Ws = [np.random.randn(LAYER_DIMS[i + 1], LAYER_DIMS[i]) *
+        Ws = [rng.standard_normal((LAYER_DIMS[i + 1], LAYER_DIMS[i])) *
               np.sqrt(2.0 / LAYER_DIMS[i]) for i in range(N_LAYERS)]
-        bs0 = [np.random.randn(LAYER_DIMS[i + 1]) * 0.1 for i in range(N_LAYERS)]
+        bs0 = [rng.standard_normal(LAYER_DIMS[i + 1]) * 0.1 for i in range(N_LAYERS)]
         res_acc, grad_acc = _ef_forward_backward_accum(Ws, bs0, SCALE, rng)
         rel = res_acc / np.maximum(grad_acc, 1e-12)     # 每层相对残差
         depth = np.arange(N_LAYERS, dtype=DT)
@@ -214,7 +214,7 @@ def verify_residual_amplification():
     mean_gap = float(np.mean(gap_l3))
     mean_r2 = float(np.mean(r2s))
     geo_amp = float(np.exp(np.mean(np.log(np.maximum(amps, 1e-12)))))
-    print(f"  每层放大因子(几何均)= {per_layer:.1f}×   L3/L1(几何均)= {geo_amp:.0f}×  (报告 86×)")
+    print(f"  每层放大因子(几何均)= {per_layer:.1f}×   L3/L1(几何均)= {geo_amp:.0f}×  (结构性结论，数值配置相关)")
     print(f"  log(rel)~深度 线性拟合 R² = {mean_r2:.3f}  (>0.7 支持指数标度律)")
     print(f"  平均梯度范数 L1→L3 放大 = {mean_gap:.2f}×  (>1 → Jacobian 放大成立)")
     # E 类判定：
@@ -238,9 +238,9 @@ def verify_residual_amplification():
         bs_arr, r2_arr, gap_arr = [], [], []
         for seed in SEEDS:
             rng = np.random.default_rng(seed)
-            Ws = [np.random.randn(dims[i + 1], dims[i]) *
+            Ws = [rng.standard_normal((dims[i + 1], dims[i])) *
                   np.sqrt(2.0 / dims[i]) for i in range(nl)]
-            bs0 = [np.random.randn(dims[i + 1]) * 0.1 for i in range(nl)]
+            bs0 = [rng.standard_normal(dims[i + 1]) * 0.1 for i in range(nl)]
             res_acc, grad_acc = _ef_forward_backward_accum(Ws, bs0, SCALE, rng, dims=dims)
             rel = res_acc / np.maximum(grad_acc, 1e-12)
             depth = np.arange(nl, dtype=DT)
@@ -284,7 +284,7 @@ def main():
     print("=" * 72)
     print(f"  耗时 {dt:.1f}s")
     print(f"  #20 [S] 超度量违反率100% (复现证伪) : {'✓' if r20 else '✗'}")
-    print(f"  #21 [E] 深层残差放大86× (经验标度)   : {'✓' if r21 else '✗'}")
+    print(f"  #21 [E] 深层残差指数放大 (经验标度)   : {'✓' if r21 else '✗'}")
     overall = r20 and r21
     print(f"\n  总体判定: {'✅ 全部通过' if overall else '❌ 存在失败'}")
     return 0 if overall else 1

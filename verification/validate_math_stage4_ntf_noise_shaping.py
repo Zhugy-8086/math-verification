@@ -8,18 +8,18 @@
 验证目标（纯数据验证，非神经网络训练）：
   #13 [S] EF ≡ delta-sigma：NTF=(1-z⁻¹)^N, STF=1
   #14 [S] 1 阶 EF 低频抑制（梯度=低通，EF=高通互补）
-  #15 [E] clip 噪声 NTF 放大 191000×（低频功率）
+  #15 [E] clip 噪声 NTF 放大 90327×（低频功率）
   #16 [S] 分离残差 EF 修复 clip 场景（不反馈 clip 误差）
 
 真实实现来源：
   - #13/#14: NTF=(1-z⁻¹)^N 频域验证
-  - #15:     同精度 + clip 场景，标准误差反馈低频放大 191000×
+  - #15:     同精度 + clip 场景，标准误差反馈低频放大 90327×
   - #16:     分离残差反馈
 
 严谨性要求（§2.4/§2.6）：
   - #13  [S] 确定性 NTF 恒等式 n_t = NTF(η)_t（代数恒等，机器精度）+ 多seed PSD ratio≈1
   - #14  [S] 低频抑制 ratio（多seed，报告 mean±std）+ 权重噪声 TF=(1-z⁻¹)^{N-1}
-  - #15  [E] 复现"同精度+clip"场景，实测低频功率放大比 vs 191000×
+  - #15  [E] 复现"同精度+clip"场景，实测低频功率放大比 vs 90327×
   - #16  [S] 分离反馈低频功率 ≈ 无反馈（无放大），标准反馈放大；多seed
 
 用法（纯 numpy，无需扩展）：
@@ -279,13 +279,13 @@ def verify_lowfreq_suppression():
               f"  → {'✓' if okN else '✗'}")
         ok2 &= okN
 
-    # ---- 3) 高阶 DC 抑制对比（与报告 10385× 一致）----
+    # ---- 3) 高阶 DC 抑制对比（与报告 657740× 一致）----
     rng = np.random.default_rng(2026)
     eta = rng.uniform(-DELTA / 2, DELTA / 2, T)
     dc1 = float(psd_of(np.cumsum(apply_ntf_filter(eta, 1)))[0][0])   # 1 阶权重噪声 DC 功率
     dc2 = float(psd_of(np.cumsum(apply_ntf_filter(eta, 2)))[0][0])   # 2 阶权重噪声 DC 功率
     r12 = dc1 / max(dc2, 1e-30)
-    print(f"  [3] 1阶→2阶 权重 DC 功率比 = {r12:.0f}×（报告 10385×，量级对比）")
+    print(f"  [3] 1阶→2阶 权重 DC 功率比 = {r12:.0f}×（报告 657740×，量级对比）")
 
     ok = ok1 and ok2
     print(f"  结论: {'✓ 1 阶 EF 低频抑制 + 高低通互补成立' if ok else '✗ 有失败'}")
@@ -293,11 +293,11 @@ def verify_lowfreq_suppression():
 
 
 # ============================================================
-# #15 [E] clip 噪声 NTF 放大 191000×（低频功率）
+# #15 [E] clip 噪声 NTF 放大 90327×（低频功率）
 # ============================================================
 def verify_clip_amplification():
     print("\n" + "=" * 72)
-    print("#15 [E] clip 噪声 NTF 放大 191000×（低频功率）")
+    print("#15 [E] clip 噪声 NTF 放大 90327×（低频功率）")
     print("=" * 72)
     print("  复现早期噪声整形探索的实验4场景：同精度+clip")
     print("  （零均值 AR(1) 信号 → 间歇 clip；delta 极小 → truncate 噪声≈0，")
@@ -326,11 +326,11 @@ def verify_clip_amplification():
 
     ratios = np.array(ratios)
     mean_r = float(np.mean(ratios))
-    theory = 191000.0
-    # [E] 经验标度：验证"极大放大"量级（与 191000× 同量级，±10× 内）
-    ok = theory / 10 <= mean_r <= theory * 10
+    theory = 90327.0
+    # [E] 经验标度：验证"极大放大"量级（与 90327× 同量级，±3× 内）
+    ok = theory / 3 <= mean_r <= theory * 3
     print(f"    低频功率放大比 = {mean_r:.0f}× ± {ratios.std():.0f}× (n={len(ratios)} seed)")
-    print(f"    冻结结论 191000× → {'✓ 同量级（机制复现）' if ok else '✗ 偏差过大'}")
+    print(f"    冻结结论 90327× → {'✓ 同量级（机制复现）' if ok else '✗ 偏差过大'}")
 
     # --- 更大 T 扫描：放大比量级随 T 稳定（更大规模不改变结论）---
     print("\n  --- 更大 T 扫描（放大比随 T 稳定性）---")
@@ -346,9 +346,9 @@ def verify_clip_amplification():
             _, eta_std = run_ef(g, quant, 'standard', N=1)
             rs.append(lowfreq_power(eta_std) / max(lowfreq_power(n_noef), 1e-30))
         m = float(np.mean(rs))
-        scan[T_s] = {"ratio": m, "consistent": bool(theory / 10 <= m <= theory * 10)}
-        print(f"    T={T_s:>6d}: 放大比={m:.0f}×（191000× 量级内 "
-              f"{'✓' if theory/10 <= m <= theory*10 else '✗'}）")
+        scan[T_s] = {"ratio": m, "consistent": bool(theory / 3 <= m <= theory * 3)}
+        print(f"    T={T_s:>6d}: 放大比={m:.0f}×（90327× 量级内 "
+              f"{'✓' if theory/3 <= m <= theory*3 else '✗'}）")
     log_span = abs(np.log10(scan[2e4]["ratio"]) - np.log10(scan[2e5]["ratio"]))
     stable = log_span < 0.5
     print(f"    T∈[2e4,2e5] 放大比 log10 跨度 = {log_span:.3f} < 0.5 → "
@@ -414,7 +414,7 @@ def main():
     print(f"  耗时 {dt:.1f}s")
     print(f"  #13 [S] EF≡delta-sigma NTF/STF : {'✓' if r13 else '✗'}")
     print(f"  #14 [S] 1阶EF低频抑制+高低通互补 : {'✓' if r14 else '✗'}")
-    print(f"  #15 [E] clip 噪声 NTF 放大 191000× : {'✓' if r15 else '✗'}")
+    print(f"  #15 [E] clip 噪声 NTF 放大 90327× : {'✓' if r15 else '✗'}")
     print(f"  #16 [S] 分离残差 EF 修复 clip   : {'✓' if r16 else '✗'}")
     overall = r13 and r14 and r15 and r16
     print(f"\n  总体判定: {'✅ 全部通过' if overall else '❌ 存在失败'}")

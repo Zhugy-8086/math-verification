@@ -1,0 +1,31 @@
+{
+  "stage": 3,
+  "backend": "numpy+torch",
+  "kind": "T/E",
+  "elapsed_s": 2.22,
+  "report": {
+    "#9": {
+      "scenarios": 300,
+      "same_bits": 300,
+      "exact0": 300,
+      "max_gap": 0.0,
+      "pass": true
+    },
+    "#10": {
+      "pass": true
+    },
+    "#11": {
+      "k_np": -1.0025844510895134,
+      "k_torch": -1.0025844510895132,
+      "r2_np": 0.9999866922464377,
+      "r2_torch": 0.9999866922464377,
+      "pass": true
+    },
+    "#12": {
+      "ratio_np": 65621.54726349995,
+      "ratio_torch": 65621.54726349995,
+      "theory": 65536.0,
+      "pass": true
+    }
+  }
+}

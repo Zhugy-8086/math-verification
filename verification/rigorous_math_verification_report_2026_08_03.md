@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 zhugy-8086
+-->
+
 # 误差反馈（EF）× 随机舍入（SR）整数量化 — 严格数学验证报告（阶段 0 ~ 阶段 9 完整版）
 
 > **日期**：2026-08-03

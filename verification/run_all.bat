@@ -1,4 +1,6 @@
 @echo off
+rem SPDX-License-Identifier: MIT
+rem Copyright (c) 2026 zhugy-8086
 rem -- one-click runner: all 12 stage verification scripts -------------
 rem -- usage: double-click, or run in cmd. exit code 0 = all passed ----
 chcp 65001 >nul

@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 zhugy-8086
+-->
+
 # 整数量化的相对误差均匀性：三方向数学验证
 
 > **日期**：2026-08-01

@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 zhugy-8086
+-->
+
 # 整数量化数学结论的独立数据验证计划
 
 > **创建日期**：2026-08-13

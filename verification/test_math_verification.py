@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 # Copyright (c) 2026 zhugy-8086
 """
 pytest 包装：subprocess 逐个运行 12 个验证脚本，断言 exit code == 0。

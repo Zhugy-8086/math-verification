@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 zhugy-8086
+-->
+
 # Integer Quantization: Rigorous Mathematical Verification
 
 整数量化的严格数学验证——随机舍入、误差反馈、位拆分、精度分配、噪声整形、梯度恒等式、网络属性。

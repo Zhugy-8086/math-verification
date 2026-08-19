@@ -2,7 +2,7 @@
   "stage": 1,
   "backend": "numpy+torch",
   "kind": "S",
-  "elapsed_s": 44.44,
+  "elapsed_s": 46.64,
   "report": {
     "#1": {
       "8-bit  [0,255]": {

@@ -2,7 +2,7 @@
   "stage": 6,
   "backend": "numpy+torch",
   "kind": "S/E",
-  "elapsed_s": 4.06,
+  "elapsed_s": 4.77,
   "report": {
     "#20": {
       "viol_np": 1.0,

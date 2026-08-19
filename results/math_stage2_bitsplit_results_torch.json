@@ -2,7 +2,7 @@
   "stage": 2,
   "backend": "numpy+torch",
   "kind": "T",
-  "elapsed_s": 0.42,
+  "elapsed_s": 0.41,
   "report": {
     "#6": {
       "checked": 7000000,

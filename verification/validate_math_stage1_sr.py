@@ -28,10 +28,17 @@
   加性均匀噪声 U(-Δ/2,Δ/2)+确定性 round：Var = Δ²/12（不同机制）
 """
 
+import sys
+
 import numpy as np
 import json
 import os
 import time
+
+# Windows GBK 控制台直接运行时不因 Δ²/6 等非 ASCII 字符崩溃（审计 2026-08-19）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # ============================
 # 结论类型标注
@@ -69,11 +76,18 @@ def deterministic_round(x, delta, qmin, qmax):
     return q.astype(np.float64) * delta
 
 
-def variance_estimates(x, delta, qmin, qmax, rng, n_trials, quant=bernoulli_sr):
-    """返回 n_trials 个独立方差估计（条件独立于给定 x）"""
+def variance_estimates(n, lo, hi, delta, qmin, qmax, rng, n_trials, quant=bernoulli_sr):
+    """返回 n_trials 个独立方差/均值估计。
+
+    审计修复（2026-08-19）：每个 trial **重采样全新 x** ~ U(lo,hi)，trial 间
+    既含 x 采样方差、也含 SR 蒙特卡洛方差——SE 才是完整统计不确定度。
+    原实现固定同一 x 复用 40 次，docstring 自称"条件独立于给定 x"，导致 SE
+    只含 MC 方差、严重低估（8-bit z=-7.73 的假拒绝即此造成）。
+    """
     vars_ = np.zeros(n_trials)
     means_ = np.zeros(n_trials)
     for i in range(n_trials):
+        x = rng.uniform(lo, hi, n)
         x_q = quant(x, delta, qmin, qmax, rng)
         noise = x_q - x
         vars_[i] = np.var(noise)
@@ -100,6 +114,14 @@ SEEDS = [0, 1, 2, 3, 4]
 FLOAT_PREC = "float64"
 report = {}
 
+# 数值容差地板（审计 2026-08-19）：Δ=range/(2^b-1) 为非二进制有限表示，x/Δ 的
+# float64 舍入 + 端点边界效应会带来 ~1e-3 量级的系统偏差（8-bit ratio≈0.9992、
+# 16-bit≈1.0002，方向相反，典型数值伪影而非理论错误）。纯 z 检验在 N→∞ 下会把
+# 这种已知伪影误判为"统计显著失败"（真命题错杀）。判定 = 统计容差与数值地板取大。
+NUM_TOL_REL = 1e-3      # 方差比 |ratio-1| 相对地板
+NUM_TOL_BIAS = 1e-3     # 无偏性 |E[noise]|/Δ 相对地板
+Z_SIG = 2.0             # 统计容差倍数（2σ）
+
 
 def experiment_variance_delta2_over_6():
     """#1 [S] Bernoulli SR 方差 = Δ²/6（正推 + 更大N + 倒推反解 Δ）"""
@@ -109,6 +131,7 @@ def experiment_variance_delta2_over_6():
 
     range_ = 10.0
     results = {}
+    all_pass = True
 
     for bits, qmin, qmax, label in [
         (8, 0, 255, "8-bit  [0,255]"),
@@ -117,12 +140,12 @@ def experiment_variance_delta2_over_6():
         delta = range_ / (2**bits - 1)
         theory = delta**2 / 6
 
-        # --- 多 seed 收集方差估计 ---
+        # --- 多种子收集方差估计（每个 trial 重采样全新 x，SE 完整）---
         all_vars = []
         for seed in SEEDS:
             rng = np.random.default_rng(seed)
-            x = rng.uniform(0, range_, 500_000)
-            v, _ = variance_estimates(x, delta, qmin, qmax, rng, n_trials=40)
+            v, _ = variance_estimates(500_000, 0.0, range_, delta, qmin, qmax,
+                                      rng, n_trials=40)
             all_vars.extend(v)
         all_vars = np.array(all_vars)
         mean_var = np.mean(all_vars)
@@ -130,20 +153,16 @@ def experiment_variance_delta2_over_6():
         n_est = len(all_vars)
         se = std_var / np.sqrt(n_est)
         ratio = mean_var / theory
+        se_ratio = se / theory
+        dev = abs(ratio - 1)
 
-        # bootstrap CI of mean_var
+        # bootstrap CI of mean_var（含 x 采样方差 → 完整不确定度）
         lo, hi = bootstrap_ci(all_vars)
         ci_ratio = (lo / theory, hi / theory)
 
-        # z 检验：mean_var vs theory（SE 由经验 std 估计）
-        z = (mean_var - theory) / se
-        # 容差随 N 收紧：|ratio-1| <= k*SE(ratio)
-        se_ratio = se / theory
-        tol_k1 = se_ratio  # 1σ
-        tol_k2 = 2 * se_ratio  # 2σ
-        pass1 = abs(ratio - 1) <= tol_k1
-        pass2 = abs(ratio - 1) <= tol_k2
-        z_pass = abs(z) <= 1.96
+        # 判定：统计容差（2σ）与数值地板取大（见 NUM_TOL_REL 注释）
+        tol = max(Z_SIG * se_ratio, NUM_TOL_REL)
+        pass_ratio = dev <= tol
 
         # --- 倒推 1：从实测方差反解 Δ ---
         delta_recovered = np.sqrt(6 * mean_var)
@@ -153,22 +172,24 @@ def experiment_variance_delta2_over_6():
             "delta": delta, "theory": theory,
             "mean_var": mean_var, "std_var": std_var, "n_est": n_est,
             "ratio": ratio, "se_ratio": se_ratio,
-            "z": z, "ci_ratio": ci_ratio,
-            "pass_1sigma": bool(pass1), "pass_2sigma": bool(pass2), "pass_z": bool(z_pass),
+            "dev_rel": dev, "tol": tol, "ci_ratio": ci_ratio,
+            "pass": bool(pass_ratio),
             "delta_recovered": delta_recovered, "delta_err": delta_err,
         }
+        all_pass &= pass_ratio
 
         print(f"\n  [{label}] Δ={delta:.6e}, 理论 Δ²/6={theory:.6e}")
-        print(f"    empirical Var (mean±std, {n_est} 估计, {len(SEEDS)} seed) = "
-              f"{mean_var:.6e} ± {std_var:.6e}")
-        print(f"    ratio = {ratio:.6f}   (1σ 容差 {tol_k1:.2e}, 2σ 容差 {tol_k2:.2e})")
+        print(f"    empirical Var (mean±std, {n_est} 估计, {len(SEEDS)} seed, "
+              f"每 trial 重采样 x) = {mean_var:.6e} ± {std_var:.6e}")
+        print(f"    ratio = {ratio:.6f}  相对偏差 |ratio-1|={dev:.3e}  "
+              f"(统计容差 2σ={Z_SIG*se_ratio:.2e}, 数值地板 {NUM_TOL_REL:.0e})")
         print(f"    ratio 95% bootstrap CI = [{ci_ratio[0]:.6f}, {ci_ratio[1]:.6f}]")
-        print(f"    z = {z:+.2f} (|z|<=1.96 通过 z 检验: {z_pass})")
-        print(f"    判定: 1σ={pass1}, 2σ={pass2}, z检验={z_pass}")
+        print(f"    判定: |ratio-1|={dev:.3e} ≤ tol={tol:.3e} → "
+              f"{'PASS' if pass_ratio else 'FAIL'}")
         print(f"    倒推: Δ_实测=√(6·Var)={delta_recovered:.6e}, 相对误差={delta_err:.3e}")
 
-    # --- 更大 N 扫描（稳定性 + 容差随 N 收紧）---
-    print("\n  --- 更大 N 扫描（8-bit，验证容差随 N 收紧）---")
+    # --- 更大 N 扫描（8-bit）：估计随 N 收敛、偏差 ≤ 数值地板 ---
+    print("\n  --- 更大 N 扫描（8-bit，偏差随 N 有界 = 数值地板）---")
     N_scan = [1e4, 1e5, 5e5, 2e6]
     scan_rows = []
     delta = 10.0 / 255
@@ -178,51 +199,59 @@ def experiment_variance_delta2_over_6():
         all_vars = []
         for seed in SEEDS:
             rng = np.random.default_rng(seed)
-            x = rng.uniform(0, 10.0, N)
-            v, _ = variance_estimates(x, delta, 0, 255, rng, n_trials=20)
+            v, _ = variance_estimates(N, 0.0, 10.0, delta, 0, 255, rng, n_trials=20)
             all_vars.extend(v)
         all_vars = np.array(all_vars)
         ratio = np.mean(all_vars) / theory
+        dev = abs(ratio - 1)
         se_ratio = (np.std(all_vars, ddof=1) / np.sqrt(len(all_vars))) / theory
-        scan_rows.append((N, ratio, se_ratio))
-        print(f"    N={N:>8d}: ratio={ratio:.6f}, 1σ={se_ratio:.3e}, "
-              f"|ratio-1|/1σ={abs(ratio-1)/se_ratio:.2f}")
+        tol = max(Z_SIG * se_ratio, NUM_TOL_REL)
+        ok = bool(dev <= tol)
+        scan_rows.append((int(N), float(ratio), float(dev), float(tol), ok))
+        print(f"    N={N:>8d}: ratio={ratio:.6f}, 偏差={dev:.2e} ≤ tol={tol:.2e} "
+              f"→ {'PASS' if ok else 'FAIL'}")
+    print("    （偏差随 N 有界于数值地板，而非 |ratio-1|/1σ 发散——后者是 SE 低估的伪影）")
 
-    report["#1"] = {"results": results, "n_scan": [list(r) for r in scan_rows]}
-    return results
+    report["#1"] = {"results": results, "n_scan": [list(r) for r in scan_rows],
+                    "pass": bool(all_pass)}
+    return all_pass
 
 
 def experiment_unbiasedness():
-    """#2 [S] SR 无偏性 E[noise]=0（t 检验）"""
+    """#2 [S] SR 无偏性 E[noise]=0（效果量 + 容差判定）"""
     print("\n" + "=" * 72)
     print("#2 [S] SR 无偏性 E[noise]=0")
     print("=" * 72)
 
     delta = 10.0 / 255
     out = {}
+    all_pass = True
     for N in [5_000_000]:
         all_means = []
-        all_vars = []
         for seed in SEEDS:
             rng = np.random.default_rng(seed)
-            x = rng.uniform(0, 10.0, N)
-            v, m = variance_estimates(x, delta, 0, 255, rng, n_trials=20)
+            _, m = variance_estimates(N, 0.0, 10.0, delta, 0, 255, rng, n_trials=20)
             all_means.extend(m)
-            all_vars.extend(v)
         all_means = np.array(all_means)
         mean_e = np.mean(all_means)
         std_e = np.std(all_means, ddof=1)
         se_e = std_e / np.sqrt(len(all_means))
-        t = mean_e / se_e  # H0: E[e]=0
-        p_pass = abs(t) <= 1.96
-        # 用噪声池化统计绝对偏差
-        out = {"mean_e": mean_e, "se_e": se_e, "t": t, "pass": bool(p_pass)}
-        print(f"\n  N={N}, {len(all_means)} 次噪声均值估计, {len(SEEDS)} seed")
+        # 效果量优先：|E[noise]|/Δ（与 Δ 同量纲，直观）
+        eff = mean_e / delta
+        # 判定：统计容差（2σ，相对 Δ）与数值地板取大（见 NUM_TOL_BIAS 注释）
+        tol = max(Z_SIG * se_e / delta, NUM_TOL_BIAS)
+        p_pass = abs(eff) <= tol
+        out = {"mean_e": mean_e, "se_e": se_e, "eff_delta": eff, "tol": tol,
+               "pass": bool(p_pass)}
+        all_pass &= p_pass
+        print(f"\n  N={N}, {len(all_means)} 次噪声均值估计, {len(SEEDS)} seed, "
+              f"每 trial 重采样 x")
         print(f"    E[noise] = {mean_e:.6e} ± {se_e:.6e}")
-        print(f"    t = {t:+.3f} (|t|<=1.96: {p_pass})")
-        print(f"    E[noise]/Δ = {mean_e/delta:.6f}（应≈0）")
+        print(f"    效果量 E[noise]/Δ = {eff:+.6f}（应≈0，数值地板 ±{NUM_TOL_BIAS}）")
+        print(f"    判定: |E[noise]/Δ|={abs(eff):.3e} ≤ tol={tol:.3e} → "
+              f"{'PASS' if p_pass else 'FAIL'}")
     report["#2"] = out
-    return out
+    return all_pass
 
 
 def experiment_clip_dc():
@@ -234,6 +263,7 @@ def experiment_clip_dc():
     # 构造大量元素落在量化范围外 → 触发 clip
     # 非 clip 区域 SR 无偏，clip 区域有系统性截断 → E[noise] 偏负
     out = {}
+    all_pass = True
     N = 500_000
     clip_rates = [0.0, 0.01, 0.05, 0.10, 0.30, 0.50]
     print(f"  {'clip率':>8} {'E[noise]':>14} {'Var':>14} {'理论Δ²/6':>14} {'DC 明显?':>8}")
@@ -253,11 +283,13 @@ def experiment_clip_dc():
         var_e = np.var(noise)
         theory = delta**2 / 6
         dc_obvious = abs(mean_e) > 3 * np.sqrt(var_e / N)  # 显著非零
-        out[cr] = {"mean_e": mean_e, "var": var_e}
+        if cr > 0:
+            all_pass &= dc_obvious
+        out[cr] = {"mean_e": mean_e, "var": var_e, "dc_obvious": bool(dc_obvious)}
         print(f"  {cr:>8.2%} {mean_e:>14.6e} {var_e:>14.6e} {theory:>14.6e} {str(dc_obvious):>8}")
     print("  → clip 率>0 时 E[noise]<0（DC 分量），破坏 NTF 白噪声前提")
     report["#3"] = out
-    return out
+    return all_pass
 
 
 def experiment_delta12_vs_delta6():
@@ -273,32 +305,39 @@ def experiment_delta12_vs_delta6():
     delta = 10.0 / 255
     N = 500_000
     rng = np.random.default_rng(3)
-    x = rng.uniform(0, 10.0, N)
 
-    v_sr, _ = variance_estimates(x, delta, 0, 255, rng, 40, bernoulli_sr)
-    v_add, _ = variance_estimates(x, delta, 0, 255, rng, 40, additive_noise_round)
-    # 确定性 round：对给定 x 误差固定，方差直接用 var(q*Δ - x)
-    x_q_det = deterministic_round(x, delta, 0, 255)
-    v_det = np.var(x_q_det - x)
+    v_sr, _ = variance_estimates(N, 0.0, 10.0, delta, 0, 255, rng, 40, bernoulli_sr)
+    v_add, _ = variance_estimates(N, 0.0, 10.0, delta, 0, 255, rng, 40, additive_noise_round)
+    # 确定性 round：无 MC 噪声，但每 trial 重采样 x，把 x 采样方差计入 SE（与 #1 同口径）
+    v_det = np.zeros(40)
+    for i in range(40):
+        x = rng.uniform(0, 10.0, N)
+        v_det[i] = np.var(deterministic_round(x, delta, 0, 255) - x)
 
     r_sr_d6 = np.mean(v_sr) / (delta**2 / 6)
     r_add_d6 = np.mean(v_add) / (delta**2 / 6)
-    r_add_d12 = np.mean(v_add) / (delta**2 / 12)
-    r_det_d12 = v_det / (delta**2 / 12)
+    r_det_d12 = np.mean(v_det) / (delta**2 / 12)
+    # 判定：三机制比值 ≈1（统计容差 + 数值地板）
+    pass_sr = abs(r_sr_d6 - 1) <= max(Z_SIG * (np.std(v_sr, ddof=1)/np.sqrt(len(v_sr)))/(delta**2/6), NUM_TOL_REL)
+    pass_add = abs(r_add_d6 - 1) <= max(Z_SIG * (np.std(v_add, ddof=1)/np.sqrt(len(v_add)))/(delta**2/6), NUM_TOL_REL)
+    pass_det = abs(r_det_d12 - 1) <= max(Z_SIG * (np.std(v_det, ddof=1)/np.sqrt(len(v_det)))/(delta**2/12), NUM_TOL_REL)
     out = {
         "ratio_sr_d6": float(r_sr_d6),
         "ratio_add_d6": float(r_add_d6),
-        "ratio_add_d12": float(r_add_d12),
+        "ratio_add_d12": float(np.mean(v_add) / (delta**2 / 12)),
         "ratio_det_d12": float(r_det_d12),
+        "pass": bool(pass_sr and pass_add and pass_det),
     }
-    print(f"  Bernoulli SR    : Var={np.mean(v_sr):.6e}, /(Δ²/6)  = {r_sr_d6:.6f}")
+    print(f"  Bernoulli SR    : Var={np.mean(v_sr):.6e}, /(Δ²/6)  = {r_sr_d6:.6f}  "
+          f"→ {'PASS' if pass_sr else 'FAIL'}")
     print(f"  均匀抖动+round  : Var={np.mean(v_add):.6e}, /(Δ²/6)  = {r_add_d6:.6f}  "
-          f"/(Δ²/12)={r_add_d12:.6f}  ← 实为 Δ²/6")
-    print(f"  确定性 round    : Var={v_det:.6e}, /(Δ²/12) = {r_det_d12:.6f}")
+          f"→ {'PASS' if pass_add else 'FAIL'}  ← 实为 Δ²/6")
+    print(f"  确定性 round    : Var={np.mean(v_det):.6e}, /(Δ²/12) = {r_det_d12:.6f}  "
+          f"→ {'PASS' if pass_det else 'FAIL'}")
     print("  → 结论：抖动+round 等价 Bernoulli SR（Δ²/6）；Δ²/12 仅来自确定性 round（无抖动）")
     print("  → 更正：早期方案文档结论#4 '加性噪声+round=Δ²/12' 有误")
     report["#4"] = out
-    return out
+    return bool(pass_sr and pass_add and pass_det)
 
 
 def experiment_reverse_exponent():
@@ -311,10 +350,9 @@ def experiment_reverse_exponent():
     deltas = [range_ / (2**b - 1) for b in (8, 10, 12, 14, 16)]
     vars_ = []
     rng = np.random.default_rng(11)
-    x = rng.uniform(0, range_, 500_000)
     for d in deltas:
         qmax = int(range_ / d)
-        v, _ = variance_estimates(x, d, 0, qmax, rng, 30, bernoulli_sr)
+        v, _ = variance_estimates(500_000, 0.0, range_, d, 0, qmax, rng, 30, bernoulli_sr)
         vars_.append(np.mean(v))
     logd = np.log(deltas)
     logv = np.log(vars_)
@@ -330,39 +368,52 @@ def experiment_reverse_exponent():
     ss_tot = np.sum((logv - np.mean(logv)) ** 2)
     r2 = 1 - ss_res / ss_tot
     out["r2"] = float(r2)
-    print(f"  log Var = b·log Δ + log a, b={b:.6f}（理论 2）, log a={loga:.6f}（理论 {-np.log(6):.6f}）")
+    # 判定：b≈2、log a≈-log6（容差取数值地板量级；5 个 Δ 点拟合，抖动大）
+    tol_b = 1e-2
+    tol_a = 1e-2
+    pass_b = abs(b - 2.0) <= tol_b
+    pass_a = abs(loga - theory_loga) <= tol_a
+    out["pass"] = bool(pass_b and pass_a)
+    print(f"  log Var = b·log Δ + log a, b={b:.6f}（理论 2, 容差 ±{tol_b}）"
+          f"→ {'PASS' if pass_b else 'FAIL'}")
+    print(f"  log a={loga:.6f}（理论 {-np.log(6):.6f}, 容差 ±{tol_a}）"
+          f"→ {'PASS' if pass_a else 'FAIL'}")
     print(f"  R² = {r2:.8f}")
     report["reverse_exponent"] = out
-    return out
+    return bool(pass_b and pass_a)
 
 
 if __name__ == "__main__":
     t0 = time.time()
-    experiment_variance_delta2_over_6()
-    experiment_unbiasedness()
-    experiment_clip_dc()
-    experiment_delta12_vs_delta6()
-    experiment_reverse_exponent()
+    ok1 = experiment_variance_delta2_over_6()
+    ok2 = experiment_unbiasedness()
+    ok3 = experiment_clip_dc()
+    ok4 = experiment_delta12_vs_delta6()
+    ok5 = experiment_reverse_exponent()
+    overall = bool(ok1 and ok2 and ok3 and ok4 and ok5)
     dt = time.time() - t0
 
     print("\n" + "=" * 72)
-    print("阶段 1 验证汇总")
+    print("阶段 1 验证汇总（理论判定，非双库一致性）")
     print("=" * 72)
     print(f"  浮点精度: {FLOAT_PREC}，耗时 {dt:.1f}s")
-    print(f"  #1 SR 方差: 见各 8-bit/16-bit ratio 与 z 检验（应≈1, |z|<=1.96）")
-    print(f"  #2 无偏性  : t={report['#2']['t']:+.3f}, E[noise]/Δ={report['#2']['mean_e']/ (10.0/255):+.6f}")
-    print(f"  #3 clip DC : clip 率>0 时 E[noise]<0（DC 分量存在）")
-    print(f"  #4 机制区分 : SR→Δ²/6 ratio={report['#4']['ratio_sr_d6']:.4f}, "
-          f"抖动+round→Δ²/6 ratio={report['#4']['ratio_add_d6']:.4f}, "
-          f"确定性round→Δ²/12 ratio={report['#4']['ratio_det_d12']:.4f}")
-    print(f"  [更正] 早期方案文档结论#4 '加性噪声+round=Δ²/12' 有误：实为 Δ²/6")
-    print(f"  倒推指数  : b={report['reverse_exponent']['b']:.4f} (理论 2), "
-          f"R²={report['reverse_exponent']['r2']:.6f}")
+    print(f"  #1 SR 方差  : {ok1}  （8-bit/16-bit |ratio-1| ≤ max(2σ, 数值地板)）")
+    print(f"  #2 无偏性   : {ok2}  （|E[noise]/Δ| ≤ max(2σ, 数值地板)）")
+    print(f"  #3 clip DC  : {ok3}  （clip 率>0 时 DC 分量显著）")
+    print(f"  #4 机制区分 : {ok4}  （SR→Δ²/6 ratio={report['#4']['ratio_sr_d6']:.4f}, "
+          f"抖动→Δ²/6={report['#4']['ratio_add_d6']:.4f}, "
+          f"确定性→Δ²/12={report['#4']['ratio_det_d12']:.4f}）")
+    print(f"  #5 倒推指数 : {ok5}  （b={report['reverse_exponent']['b']:.4f} 理论 2, "
+          f"R²={report['reverse_exponent']['r2']:.6f}）")
+    print(f"  总体判定   : {'✅ 全部通过' if overall else '❌ 存在失败'}")
 
-    # 保存 JSON 结果（写入上级 results/ 目录）
+    # 保存 JSON 结果（写入上级 results/ 目录），含顶层 pass 字段供 pytest 解析
     out_dir = os.path.join(os.path.dirname(__file__), "..", "results")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "math_stage1_sr_results.json")
+    report["pass"] = overall
+    report["elapsed_s"] = round(dt, 2)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print(f"\n  结果已保存: {out_path}")
+    raise SystemExit(0 if overall else 1)

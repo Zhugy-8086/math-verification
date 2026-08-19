@@ -32,6 +32,11 @@ import time
 
 import numpy as np
 
+# Windows GBK 控制台直接运行时不因 Δ²/6 等非 ASCII 字符崩溃（审计 2026-08-19）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # ============================================================
 # 交叉验证开关：发布版不依赖任何外部实现，本地自包含实现即为唯一参照
 # ============================================================

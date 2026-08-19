@@ -26,6 +26,12 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import sys
+
+# Windows GBK 控制台直接运行时不因 Δ²/6 等非 ASCII 字符崩溃（审计 2026-08-19）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 SEEDS = [0, 1, 2, 3, 4]     # 多随机种子
 

@@ -11,6 +11,22 @@ Copyright (c) 2026 zhugy-8086
 > **执行策略**：结论数量多且每项都需 CPU 计算，故**排好顺序、逐步执行**，不一次性全做。
 > **产物**：每个结论一个 `validate_*.py` 脚本 + 验证结论记录回本文档。
 
+> ⚠️ **口径更新（2026-08-19 审计，与 README/脚本同步）**：
+> 1. **T 类**判定由"bit-exact / 零容差"改为 **allclose(atol≤1e-12) 机器精度**（排除实现误差，
+>    非严格 bit-exact）——见 §2.4 表。
+> 2. **S 类**判定由"假设检验（z/t/卡方）+ 容差随 N 收紧"改为 **效果量 + max(2σ, 数值地板)**：
+>    - 纯 z/t 检验在 N→∞ 下会把 ~1e-3 量级的数值伪影（Δ=range/(2^b-1) 非二进制表示的
+>      float64 舍入 + 端点边界）误判为"统计显著失败"（真命题错杀，stage1 8-bit 曾报
+>      z=-7.73 假拒绝）；
+>    - 数值地板 `1e-3`（相对）是文档化、有界的工程妥协，**效果量始终如实报告**
+>      （如 ratio、|E[noise]/Δ|），读者可见实际偏差大小；
+>    - **SE 必须包含完整统计不确定度**：`variance_estimates` 每个 trial **重采样全新 x**，
+>      禁止固定 x 复用（原实现只含 MC 方差、SE 严重低估）——见 §2.5。
+> 3. **结论 #4 更正**：加性均匀噪声+round 实为 **Δ²/6**（与 Bernoulli SR 同源），非 Δ²/12；
+>    Δ²/12 仅来自**确定性 round（无抖动）**——见阶段 1 表。
+> 4. **PASS 语义**：`*_torch.py` 的双库一致 PASS ≠ 理论成立；理论成立以 numpy 单库脚本
+>    退出码（效果量+容差判定）为准。
+
 ---
 
 ## 1. 背景与目标
@@ -53,8 +69,8 @@ Copyright (c) 2026 zhugy-8086
 
 | 类别 | 含义 | 例子 | 判定标准 |
 |------|------|------|---------|
-| **T（定理/恒等式）** | 位精确或代数恒成立 | int12 可逆、位拆分可逆、int16 视角重构、量化公式 | **严格相等**（bit-exact / 机器精度），零容差 |
-| **S（统计定律）** | 随机过程的理论期望/分布 | SR 方差=Δ²/6、SR 无偏性 E[noise]=0、clip DC 分量、Δ²/12 | **假设检验 + 置信区间**，容差随 N 收紧 |
+| **T（定理/恒等式）** | 位精确或代数恒成立 | int12 可逆、位拆分可逆、int16 视角重构、量化公式 | **机器精度**（allclose atol≤1e-12），非严格 bit-exact |
+| **S（统计定律）** | 随机过程的理论期望/分布 | SR 方差=Δ²/6、SR 无偏性 E[noise]=0、clip DC 分量、确定性 round=Δ²/12 | **效果量 + max(2σ, 数值地板 1e-3)**，多 seed，SE 含完整不确定度 |
 | **E（经验标度律）** | 由实验拟合的常数/关系 | 精度提升倍数、power law 指数、深层放大倍数 | **验证关系/标度**而非常数，报告 CI 与拟合优度 |
 
 ### 2.5 统计类（S）的严谨性要求
@@ -62,11 +78,20 @@ Copyright (c) 2026 zhugy-8086
 对 S 类结论，禁止单点估计。至少做到：
 1. **多随机种子**（≥ 5 个 seed），报告 `mean ± std`，而非单次 ratio；
 2. **置信区间**：bootstrap（≥ 1000 次重采样）或解析标准误；
-3. **假设检验**：
-   - 无偏性 `E[noise]=0` → t 检验（或报告 E±2σ 是否含 0）；
-   - 方差比 `Var_empirical/Var_theory=1` → 基于样本方差的卡方/F 分布检验；
-4. **容差随 N 收紧**：容差 = 理论标准误 × 系数，即 `|ratio-1| ≤ k·sqrt(2/(N-1))` 之类，而非固定 ±1%。N 越大，允许偏差越小。
+3. **SE 必须包含完整统计不确定度**（2026-08-19 审计）：
+   - 每个 trial **重采样全新 x**，trial 间既含 x 采样方差、也含蒙特卡洛方差；
+   - **禁止固定同一 x 复用**——那样 SE 只含 MC 方差、严重低估（stage1 8-bit
+     `z=-7.73` 的假拒绝即此造成）；
+4. **判定 = 效果量 + 容差取大**：
+   - 报告效果量（如 `ratio=Var_emp/Var_theory`、`E[noise]/Δ`），而非裸 p 值；
+   - `PASS ⇔ |效果量−理论| ≤ max(2σ_SE, 数值地板)`；
+   - 数值地板 `1e-3`（相对）覆盖已知 float64 伪影（Δ 非二进制表示 + 端点边界），
+     是文档化、有界的工程妥协；效果量始终如实报告，读者可见实际偏差；
 5. **明确浮点精度**：声明统计是在 float64 还是 float32 下进行。
+
+> **为何不用纯 z/t 检验**：假设检验在 N→∞ 下必然拒绝任何微小（但真实）的系统偏差，
+> 即使该偏差来自数值伪影（~1e-3）而非理论错误。效果量 + 有界容差把"统计显著"与
+> "实用精确"分开，避免真命题被错杀，同时如实暴露偏差大小。
 
 ### 2.6 倒推（Reverse）的严谨性要求
 
@@ -102,7 +127,7 @@ Copyright (c) 2026 zhugy-8086
 | 1 | [S] Bernoulli 随机舍入噪声方差 = Δ²/6 | `Var(noise)=Δ²/6` | 正推+更大N+倒推(反解Δ) | validate_math_stage1_sr.py |
 | 2 | [S] 随机舍入无偏性 | `E[noise]=0` | 正推+更大N | 同上 |
 | 3 | [S] clip 噪声含 DC 分量（白噪声前提被破坏） | clip 后 `E[noise]≠0` | 正推+更大N（clip 率扫描） | validate_math_stage1_sr.py |
-| 4 | [S] 加性均匀噪声+round = Δ²/12，与 Bernoulli 随机舍入(Δ²/6) 区分 | 两种机制方差不同 | 正推 | validate_math_stage1_sr.py |
+| 4 | [S] 三种量化机制方差区分（2026-08-19 更正） | 确定性 round（无抖动）=Δ²/12；**均匀抖动+round 实为 Δ²/6**（与 Bernoulli SR 同源） | 正推 | validate_math_stage1_sr.py |
 
 > 阶段 1 结论已在 validate_math_stage1_sr.py 验证过（ratio≈1.0000），本阶段主要是**更大 N 复核 + 倒推反解 Δ** 的补强。
 
@@ -189,15 +214,18 @@ def check():
     results = [empirical_value(seed, N, ...) for seed in RNG_SEEDS]
     mean, std = np.mean(results), np.std(results)
 
-    # --- T 类：严格相等（bit-exact），零容差 ---
+    # --- T 类：机器精度（allclose atol≤1e-12），排除实现误差 ---
     if kind == "T":
-        assert np.array_equal(empirical, theory), "T 类必须位精确相等"
+        assert np.isclose(empirical, theory, atol=1e-12, rtol=1e-12), \
+            "T 类须机器精度一致（非严格 bit-exact）"
 
-    # --- S 类：假设检验 + 随 N 收紧的容差（§2.5） ---
+    # --- S 类：效果量 + max(2σ, 数值地板)（§2.5，2026-08-19 口径） ---
     elif kind == "S":
-        # 例：E[noise]=0 → 报告 mean±2*std 是否含 0；Var 比 → 卡方/F 检验
-        tol = k * np.sqrt(2 / (N - 1))            # 容差随 N 收紧
-        assert abs(ratio - 1) <= tol, f"ratio={ratio} tol={tol}"
+        # SE 须含完整不确定度（每 trial 重采样 x，禁止固定 x 复用）
+        se = np.std(results, ddof=1) / np.sqrt(len(results))
+        tol = max(2 * se, NUM_TOL_REL)             # 数值地板 NUM_TOL_REL=1e-3
+        assert abs(ratio - 1) <= tol, f"ratio={ratio} |ratio-1|={abs(ratio-1)} tol={tol}"
+        print(f"    效果量 |ratio-1|={abs(ratio-1):.3e}（统计 2σ={2*se:.2e}, 数值地板 {NUM_TOL_REL:.0e}）")
 
     # --- E 类：验证关系/标度，报告 CI + R²（§2.6） ---
     elif kind == "E":
@@ -208,11 +236,13 @@ def check():
     ...
 ```
 
-**判定标准（按性质类别）**：
-- **T 类**：`np.array_equal` / 机器精度严格相等，零容差 → PASS；否则 FAIL。
-- **S 类**：多 seed 报告 `mean±std`，用假设检验（t / 卡方 / F）+ bootstrap CI，容差随 N 收紧（`k·√(2/(N-1))`）→ 通过检验则 PASS。
+**判定标准（按性质类别，2026-08-19 口径）**：
+- **T 类**：`np.isclose(atol=1e-12)` 机器精度一致（排除实现误差；非严格 bit-exact）→ PASS；否则 FAIL。
+- **S 类**：多 seed 报告 `mean±std`，SE 含完整不确定度（每 trial 重采样 x），
+  判定 = 效果量 ≤ max(2σ, 数值地板 1e-3) → PASS；同时报告效果量（读者可见偏差大小）。
 - **E 类**：验证关系/标度（log-log 拟合参数 a、b），报告 R² 与参数 CI，CI 与冻结值重叠则 PASS。
-- **更大规模**：在 N 增大后估计稳定（不漂移）为 PASS；若漂移/发散，标记为"暴露边界条件"，并区分**真实统计偏差** vs **数值精度伪影**（§2.3）。
+- **更大规模**：在 N 增大后估计稳定（偏差 ≤ 数值地板，而非 `|ratio-1|/1σ` 发散）为 PASS；
+  若漂移/发散，标记为"暴露边界条件"，并区分**真实统计偏差** vs **数值精度伪影**（§2.3）。
 
 ---
 

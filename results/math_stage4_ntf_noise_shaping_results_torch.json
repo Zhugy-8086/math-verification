@@ -2,7 +2,7 @@
   "stage": 4,
   "backend": "numpy+torch",
   "kind": "S/E",
-  "elapsed_s": 434.76,
+  "elapsed_s": 380.94,
   "report": {
     "#13": {
       "pass": true
